@@ -177,7 +177,7 @@ check_for_new_versions() {
 
 
   # check aosp
-  existing_aosp_build=$(cat $CHAOSP_DIR/revisions/${DEVICE}-vendor || true)
+  existing_aosp_build=$(cat $CHAOSP_DIR/${DEVICE}-vendor || true)
   if [ "$existing_aosp_build" == "$AOSP_BUILD" ]; then
     echo "AOSP build ($existing_aosp_build) is up to date"
   else
@@ -392,7 +392,7 @@ check_chromium() {
   log "Chromium latest: $LATEST_CHROMIUM"
   if [ "$LATEST_CHROMIUM" == "$current" ]; then
     log "Chromium latest ($LATEST_CHROMIUM) matches current ($current) - just copying chromium artifact"
-    cp $CHAOSP_DIR/chromium/MonochromePublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
+    cp $CHAOSP_DIR/MonochromePublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
   else
     log "Building chromium $LATEST_CHROMIUM"
     build_chromium $LATEST_CHROMIUM
@@ -489,7 +489,7 @@ aosp_repo_modifications() {
       print "  ";
       print "  <remote name=\"github\" fetch=\"https://github.com/RattlesnakeOS/\" revision=\"" ANDROID_VERSION "\" />";
       print "  <remote name=\"fdroid\" fetch=\"https://gitlab.com/fdroid/\" />";
-      print "  <remote name=\"prepare-vendor\" fetch=\"https://github.com/anestisb/\" revision=\"master\" />";  
+      print "  <remote name=\"prepare-vendor\" fetch=\"https://github.com/RattlesnakeOS/\" revision=\"master\" />";
       print "  <remote name=\"opengapps\" fetch=\"https://github.com/opengapps/\"  />";
       print "  <remote name=\"gitlab\" fetch=\"https://gitlab.opengapps.org/opengapps/\"  />";
       
