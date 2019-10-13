@@ -51,10 +51,12 @@ case "$DEVICE" in
   crosshatch|blueline)
     DEVICE_FAMILY=crosshatch
     AVB_MODE=vbmeta_chained
+    EXTRA_OTA=(--retrofit_dynamic_partitions)
     ;;
   sargo|bonito)
     DEVICE_FAMILY=bonito
     AVB_MODE=vbmeta_chained
+    EXTRA_OTA=(--retrofit_dynamic_partitions)
     ;;
   *)
     echo "warning: unknown device $DEVICE, using Pixel 3 defaults"
@@ -83,13 +85,13 @@ ENCRYPTION_KEY=
 ENCRYPTION_PIPE="/tmp/key"
 
 # pin to specific version of android
-ANDROID_VERSION="9.0"
+ANDROID_VERSION="10.0"
 
 # build type (user or userdebug)
 BUILD_TYPE="user"
 
 # build channel (stable or beta)
-BUILD_CHANNEL="stable"
+BUILD_CHANNEL="beta"
 
 # user customizable things
 #HOSTS_FILE="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-social/hosts"
@@ -148,7 +150,7 @@ get_latest_versions() {
 
   # attempt to automatically pick latest build version and branch. note this is likely to break with any page redesign. should also add some validation here.
   if [ -z "$AOSP_BUILD" ]; then
-    AOSP_BUILD=$(curl --fail -s ${AOSP_URL_BUILD} | grep -A1 "${DEVICE}" | egrep '[a-zA-Z]+ [0-9]{4}\)' | grep "${ANDROID_VERSION}" | tail -1 | cut -d"(" -f2 | cut -d"," -f1)
+    AOSP_BUILD=$(curl --fail -s ${AOSP_URL_BUILD} | grep -A1 "${DEVICE}" | egrep '[a-zA-Z]+ [0-9]{4}\)' | grep -F "${ANDROID_VERSION}" | tail -1 | cut -d"(" -f2 | cut -d"," -f1)
     if [ -z "$AOSP_BUILD" ]; then
       echo "ERROR: Unable to get latest AOSP build information. Stopping build. This lookup is pretty fragile and can break on any page redesign of ${AOSP_URL_BUILD}"
       exit 1
@@ -258,6 +260,7 @@ full_run() {
   aosp_repo_sync
   gen_keys
   setup_vendor
+  build_fdroid
   apply_patches
   # only marlin and sailfish need kernel rebuilt so that verity_key is included
   if [ "${DEVICE}" == "marlin" ] || [ "${DEVICE}" == "sailfish" ]; then
@@ -272,6 +275,19 @@ full_run() {
   release "${DEVICE}"
   checkpoint_versions
   echo "CHAOSP Build SUCCESS"
+}
+
+build_fdroid() {
+  log_header ${FUNCNAME}
+  # build it outside AOSP build tree or hit errors
+  git clone https://gitlab.com/fdroid/fdroidclient ${CHAOSP_DIR}/fdroidclient
+  pushd ${CHAOSP_DIR}/fdroidclient
+  echo "sdk.dir=${CHAOSP_DIR}/sdk" > local.properties
+  echo "sdk.dir=${CHAOSP_DIR}/sdk" > app/local.properties
+  git checkout $FDROID_CLIENT_VERSION
+  retry ./gradlew assembleRelease
+  cp -f app/build/outputs/apk/full/release/app-full-release-unsigned.apk ${BUILD_DIR}/packages/apps/F-Droid/F-Droid.apk
+  popd
 }
 
 get_encryption_key() {
@@ -454,7 +470,7 @@ android_default_version_code = "$DEFAULT_VERSION"
 EOF
   gn gen out/Default
 
-  log "Building chromium monochrome_public target"
+  log "Building chromium monochrome_public_apk target"
   autoninja -C out/Default/ monochrome_public_apk
 
   # copy to build tree
@@ -489,7 +505,6 @@ aosp_repo_modifications() {
       print "  ";
       print "  <remote name=\"github\" fetch=\"https://github.com/RattlesnakeOS/\" revision=\"" ANDROID_VERSION "\" />";
       print "  <remote name=\"fdroid\" fetch=\"https://gitlab.com/fdroid/\" />";
-      print "  <remote name=\"prepare-vendor\" fetch=\"https://github.com/RattlesnakeOS/\" revision=\"master\" />";
       print "  <remote name=\"opengapps\" fetch=\"https://github.com/opengapps/\"  />";
       print "  <remote name=\"gitlab\" fetch=\"https://gitlab.opengapps.org/opengapps/\"  />";
       
@@ -502,12 +517,13 @@ aosp_repo_modifications() {
 
       print "  <project path=\"external/chromium\" name=\"platform_external_chromium\" remote=\"github\" />";
       print "  <project path=\"packages/apps/Updater\" name=\"platform_packages_apps_Updater\" remote=\"github\" />";
-      print "  <project path=\"packages/apps/F-Droid\" name=\"fdroidclient\" remote=\"fdroid\" revision=\"refs/tags/" FDROID_CLIENT_VERSION "\" />";
+      print "  <project path=\"packages/apps/F-Droid\" name=\"platform_external_fdroid\" remote=\"github\" />";
       print "  <project path=\"packages/apps/F-DroidPrivilegedExtension\" name=\"privileged-extension\" remote=\"fdroid\" revision=\"refs/tags/" FDROID_PRIV_EXT_VERSION "\" />";
-      print "  <project path=\"vendor/android-prepare-vendor\" name=\"android-prepare-vendor\" remote=\"prepare-vendor\" />"}' .repo/manifest.xml
+      print "  <project path=\"vendor/android-prepare-vendor\" name=\"android-prepare-vendor\" remote=\"github\" />"}' .repo/manifest.xml
  
     # remove things from manifest
-    sed -i '/chromium-webview/d' .repo/manifest.xml
+    # TODO: add this back when trichrome webview is working
+    # sed -i '/chromium-webview/d' .repo/manifest.xml
     sed -i '/packages\/apps\/Browser2/d' .repo/manifest.xml
     sed -i '/packages\/apps\/Calendar/d' .repo/manifest.xml
     sed -i '/packages\/apps\/QuickSearchBox/d' .repo/manifest.xml
@@ -529,8 +545,11 @@ aosp_repo_sync() {
 setup_vendor() {
   log_header ${FUNCNAME}
 
+  # new dependency to extract ota partitions
+  sudo DEBIAN_FRONTEND=noninteractive apt-get -y install python-protobuf
+
   # get vendor files (with timeout)
-  timeout 30m "${BUILD_DIR}/vendor/android-prepare-vendor/execute-all.sh" --full --debugfs --keep --yes --device "${DEVICE}" --buildID "${AOSP_BUILD}" --output "${BUILD_DIR}/vendor/android-prepare-vendor"
+  timeout 30m "${BUILD_DIR}/vendor/android-prepare-vendor/execute-all.sh" --debugfs --keep --yes --device "${DEVICE}" --buildID "${AOSP_BUILD}" --output "${BUILD_DIR}/vendor/android-prepare-vendor"
   echo "${AOSP_BUILD}" > $CHAOSP_DIR/${DEVICE}-vendor
 
   # copy vendor files to build tree
@@ -550,19 +569,38 @@ apply_patches() {
 
   revert_previous_run_patches
   patch_mkbootfs
-  patch_add_opengapps
+  #patch_add_opengapps
   patch_custom
   patch_aosp_removals
   patch_add_apps
   #patch_tethering
   patch_base_config
   patch_device_config
-  patch_chromium_webview
+  # TODO: add this back when trichrome webview is working
+  # patch_chromium_webview
   patch_updater
-  patch_fdroid
   patch_priv_ext
   patch_launcher
-  patch_vendor_security_level
+  patch_broken_alarmclock
+  patch_disable_apex
+}
+
+patch_broken_alarmclock(){
+  log_header ${FUNCNAME}
+
+  if ! grep -q "android.permission.FOREGROUND_SERVICE" ${BUILD_DIR}/packages/apps/DeskClock/AndroidManifest.xml; then
+    sed -i '/<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" \/>/a <uses-permission android:name="android.permission.FOREGROUND_SERVICE" \/>' ${BUILD_DIR}/packages/apps/DeskClock/AndroidManifest.xml
+    sed -i 's@<uses-sdk android:minSdkVersion="19" android:targetSdkVersion="28" />@<uses-sdk android:minSdkVersion="19" android:targetSdkVersion="25" />@' ${BUILD_DIR}/packages/apps/DeskClock/AndroidManifest.xml
+  fi
+}
+
+patch_disable_apex(){
+  log_header ${FUNCNAME}
+  # pixel 1 devices do not support apex so nothing to patch
+  # pixel 2 devices opt in here
+  sed -i 's@$(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)@@' ${BUILD_DIR}/device/google/wahoo/device.mk
+  # all other devices use mainline and opt in here
+  sed -i 's@$(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)@@' ${BUILD_DIR}/build/make/target/product/mainline_system.mk
 }
 
 # This patch is needed to be able to add "." prefixed files/folders (like ".backup" and ".magisk") from Magisk, into the boot image
@@ -572,6 +610,7 @@ patch_mkbootfs(){
 }
 
 # This patch is needed to make opengapps included/called during the build phase
+# This isn't working anymore in 10.0. Need to get to the bottom of it.
 patch_add_opengapps(){
   cd $BUILD_DIR/device/google/$DEVICE_FAMILY/
   sed -i "s/# PRODUCT_RESTRICT_VENDOR_FILES := all/PRODUCT_RESTRICT_VENDOR_FILES := false/g" aosp_$DEVICE.mk
@@ -583,12 +622,14 @@ patch_aosp_removals() {
   log_header ${FUNCNAME}
 
   # remove aosp chromium webview directory
-  rm -rf ${BUILD_DIR}/platform/external/chromium-webview
+  # TODO: add this back when trichrome webview is working
+  # rm -rf ${BUILD_DIR}/platform/external/chromium-webview
 
   # loop over all make files as these keep changing and remove components
   for mk_file in ${BUILD_DIR}/build/make/target/product/*.mk; do
+    # TODO: add this back when trichrome webview is working
     # remove aosp webview
-    sed -i '/webview \\/d' ${mk_file}
+    # sed -i '/webview \\/d' ${mk_file}
 
     # remove Browser2
     sed -i '/Browser2/d' ${mk_file}
@@ -644,17 +685,17 @@ patch_custom() {
     retry git clone https://github.com/RattlesnakeOS/community_patches ${patches_dir}/community_patches
   fi
  
-  log "Applying patch 00001-global-internet-permission-toggle.patch"
-  patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00001-global-internet-permission-toggle.patch
+  # log "Applying patch 00001-global-internet-permission-toggle.patch"
+  # patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00001-global-internet-permission-toggle.patch
 
-  log "Applying patch 00002-global-sensors-permission-toggle.patch"
-  patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00002-global-sensors-permission-toggle.patch
+  # log "Applying patch 00002-global-sensors-permission-toggle.patch"
+  # patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00002-global-sensors-permission-toggle.patch
 
-  log "Applying patch 00003-disable-menu-entries-in-recovery.patch"
-  patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00003-disable-menu-entries-in-recovery.patch
+  # log "Applying patch 00003-disable-menu-entries-in-recovery.patch"
+  # patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00003-disable-menu-entries-in-recovery.patch
 
-  log "Applying patch 00004-increase-default-maximum-password-length.patch"
-  patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00004-increase-default-maximum-password-length.patch
+  # log "Applying patch 00004-increase-default-maximum-password-length.patch"
+  # patch -p1 --no-backup-if-mismatch < ${patches_dir}/community_patches/00004-increase-default-maximum-password-length.patch
 
 
   # # allow custom scripts to be applied
@@ -672,8 +713,8 @@ patch_custom() {
   if [ ! -d ${scripts_dir}/example_patch_shellscript ]; then
     retry git clone "https://github.com/RattlesnakeOS/example_patch_shellscript" ${scripts_dir}/example_patch_shellscript || true
   fi
-  log "Applying shell script 00002-custom-boot-animation.sh"
-  . ${scripts_dir}/example_patch_shellscript/00002-custom-boot-animation.sh
+  # log "Applying shell script 00002-custom-boot-animation.sh"
+  # . ${scripts_dir}/example_patch_shellscript/00002-custom-boot-animation.sh
 
   # # allow prebuilt applications to be added to build tree
   # prebuilt_dir="$BUILD_DIR/packages/apps/Custom"
@@ -723,14 +764,6 @@ patch_base_config() {
   sed -i 's@<bool name="config_swipe_up_gesture_setting_available">false</bool>@<bool name="config_swipe_up_gesture_setting_available">true</bool>@' ${BUILD_DIR}/frameworks/base/core/res/res/values/config.xml
 }
 
-patch_vendor_security_level() {
-  log_header ${FUNCNAME}
-
-  f=$(echo "${AOSP_BUILD}" | awk -F"." '{print $2}')
-  VENDOR_SECURITY_PATCH_LEVEL="20${f::2}-${f:2:2}-${f:4:2}"
-  sed -i 's@2018-09-05@'${VENDOR_SECURITY_PATCH_LEVEL}'@' ${BUILD_DIR}/device/google/crosshatch/device-common.mk || true
-}
-
 patch_device_config() {
   log_header ${FUNCNAME}
 
@@ -762,30 +795,12 @@ patch_chromium_webview() {
 EOF
 }
 
-patch_fdroid() {
-  log_header ${FUNCNAME}
-
-  echo "sdk.dir=${CHAOSP_DIR}/sdk" > ${BUILD_DIR}/packages/apps/F-Droid/local.properties
-  echo "sdk.dir=${CHAOSP_DIR}/sdk" > ${BUILD_DIR}/packages/apps/F-Droid/app/local.properties
-  sed -i 's/gradle assembleRelease/..\/gradlew assembleRelease/' ${BUILD_DIR}/packages/apps/F-Droid/Android.mk
-  sed -i 's@fdroid_apk   := build/outputs/apk/$(fdroid_dir)-release-unsigned.apk@fdroid_apk   := build/outputs/apk/full/release/app-full-release-unsigned.apk@'  ${BUILD_DIR}/packages/apps/F-Droid/Android.mk
-
-  # sometimes gradle dependencies fail to download, so gradle build with retry before the AOSP build as workaround
-  pushd ${BUILD_DIR}/packages/apps/F-Droid
-  retry ./gradlew assembleRelease
-  popd
-}
-
 get_package_mk_file() {
   # this is newer location in master
   mk_file=${BUILD_DIR}/build/make/target/product/handheld_system.mk
   if [ ! -f ${mk_file} ]; then
-    # this is older location
-    mk_file=${BUILD_DIR}/build/make/target/product/core.mk
-    if [ ! -f ${mk_file} ]; then
-      log "Expected handheld_system.mk or core.mk do not exist"
-      exit 1
-    fi
+    log "Expected handheld_system.mk or core.mk do not exist"
+    exit 1
   fi
   echo ${mk_file}
 }
@@ -863,19 +878,20 @@ rebuild_marlin_kernel() {
   git checkout ${kernel_commit_id}
 
   # run in another shell to avoid it mucking with environment variables for normal AOSP build
-  bash -c "\
-    set -e;
-    cd ${BUILD_DIR};
-    . build/envsetup.sh;
-    make -j$(nproc --all) dtc mkdtimg;
-    export PATH=${BUILD_DIR}/out/host/linux-x86/bin:${PATH};
-    ln --verbose --symbolic ${KEYS_DIR}/${DEVICE}/verity_user.der.x509 ${MARLIN_KERNEL_SOURCE_DIR}/verity_user.der.x509;
-    cd ${MARLIN_KERNEL_SOURCE_DIR};
-    make -j$(nproc --all) ARCH=arm64 marlin_defconfig;
-    make -j$(nproc --all) ARCH=arm64 CONFIG_COMPAT_VDSO=n CROSS_COMPILE=${BUILD_DIR}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin/aarch64-linux-android-;
-    cp -f arch/arm64/boot/Image.lz4-dtb ${BUILD_DIR}/device/google/marlin-kernel/;
-    rm -rf ${BUILD_DIR}/out/build_*;
-  "
+  (
+      set -e;
+      export PATH="${BUILD_DIR}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin:${PATH}";
+      export PATH="${BUILD_DIR}/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin:${PATH}";
+      export PATH="${BUILD_DIR}/prebuilts/misc/linux-x86/lz4:${PATH}";
+      export PATH="${BUILD_DIR}/prebuilts/misc/linux-x86/dtc:${PATH}";
+      export PATH="${BUILD_DIR}/prebuilts/misc/linux-x86/libufdt:${PATH}";
+      ln --verbose --symbolic ${KEYS_DIR}/${DEVICE}/verity_user.der.x509 ${MARLIN_KERNEL_SOURCE_DIR}/verity_user.der.x509;
+      cd ${MARLIN_KERNEL_SOURCE_DIR};
+      make O=out ARCH=arm64 marlin_defconfig;
+      make -j$(nproc --all) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi-
+      cp -f out/arch/arm64/boot/Image.lz4-dtb ${BUILD_DIR}/device/google/marlin-kernel/;
+      rm -rf ${BUILD_DIR}/out/build_*;
+  )
 }
 
 build_aosp() {
@@ -894,7 +910,9 @@ build_aosp() {
   export DISPLAY_BUILD_NUMBER=true
   chrt -b -p 0 $$
 
-  prebuilts/misc/linux-x86/ccache/ccache -M 100G
+  ccache -M 100G
+
+  sed -i 's/ls -vr/\/bin\/ls -vr/' ${BUILD_DIR}/vendor/opengapps/build/core/find_apk.sh
 
   choosecombo $BUILD_TARGET
   log "Running target-files-package"
@@ -965,7 +983,8 @@ release() {
 
 
   log "Running sign_target_files_apks"
-  build/tools/releasetools/sign_target_files_apks -o -d "$KEY_DIR" "${AVB_SWITCHES[@]}" \
+  # build/tools/releasetools/sign_target_files_apks -o -d "$KEY_DIR" "${AVB_SWITCHES[@]}" \
+  build/tools/releasetools/sign_target_files_apks -o -d "$KEY_DIR" -k "build/target/product/security/networkstack=${KEY_DIR}/networkstack" "${AVB_SWITCHES[@]}" \
     out/target/product/$DEVICE/obj/PACKAGING/target_files_intermediates/$PREFIX$DEVICE-target_files-$BUILD_NUMBER.zip \
     $OUT/$TARGET_FILES
 
@@ -999,8 +1018,8 @@ checkpoint_versions() {
   log_header ${FUNCNAME}
 
   # checkpoint f-droid
-  echo "${FDROID_PRIV_EXT_VERSION}" > $CHAOSP_DIR/revisions/fdroid-priv/revision"
-  echo "${FDROID_CLIENT_VERSION}" > $CHAOSP_DIR/revisions/fdroid/revision"
+  echo "${FDROID_PRIV_EXT_VERSION}" > "$CHAOSP_DIR/revisions/fdroid-priv/revision"
+  echo "${FDROID_CLIENT_VERSION}" > "$CHAOSP_DIR/revisions/fdroid/revision"
 }
 
 
@@ -1010,7 +1029,7 @@ gen_keys() {
   mkdir -p "${KEYS_DIR}/${DEVICE}"
   cd "${KEYS_DIR}/${DEVICE}"
   if [ -z "$(ls -A ${KEYS_DIR}/${DEVICE})" ]; then
-    for key in {releasekey,platform,shared,media,verity} ; do
+    for key in {releasekey,platform,shared,media,networkstack,verity} ; do
       # make_key exits with unsuccessful code 1 instead of 0, need ! to negate
       ! "${BUILD_DIR}/development/tools/make_key" "$key" "$CERTIFICATE_SUBJECT"
     done
