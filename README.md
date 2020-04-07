@@ -31,10 +31,18 @@ I'm personally building this on a (quite powerful) computer (4c/8t Core i7, 32GB
 ## Building  
 
 ./prerequisites.sh  
-./build.sh [-m] device  
+./build.sh [-m] DEVICE FORCE_BUILD AOSP_BUILD AOSP_BRANCH
 
 The -m argument will build Magisk in.  
 
+DEVICE --> The codename of the device you would like to build, e.g., sargo for Pixel 3a
+FORCE --> Whether or not you want to force a re-build, even when an updated version isn't available. You should probably use false so as to avoid unnecessary rebuilds
+AOSP_BUILD --> The android build ID, as listed on https://developers.google.com/android/ota. For example: qq2a.200405.005, for the April 2020 update
+AOSP_BRANCH --> The source code tag, as listed on https://android.googlesource.com/platform/manifest/+refs. For example: android-10.0.0_r33, for the qq2a.200405.005 build
+
+Putting it all together:
+
+./build.sh sargo false qq2a.200405.005 android-10.0.0_r33
 
 ## Flashing  
 
