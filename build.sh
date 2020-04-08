@@ -1,12 +1,15 @@
 #!/bin/bash
 
+
 CHAOSP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+export TMPDIR="$CHAOSP_DIR/tmp"
 ADD_MAGISK=false
 ADD_OPENGAPPS=false
 
 mkdir -p $CHAOSP_DIR/revisions
 mkdir -p $CHAOSP_DIR/revisions/fdroid
 mkdir -p $CHAOSP_DIR/revisions/fdroid-priv
+mkdir -p $TMPDIR
 
 
 usage(){
@@ -408,7 +411,7 @@ check_chromium() {
   log "Chromium latest: $LATEST_CHROMIUM"
   if [ "$LATEST_CHROMIUM" == "$current" ]; then
     log "Chromium latest ($LATEST_CHROMIUM) matches current ($current) - just copying chromium artifact"
-    cp $CHAOSP_DIR/MonochromePublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
+    cp $CHAOSP_DIR/ChromeModernPublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
   else
     log "Building chromium $LATEST_CHROMIUM"
     build_chromium $LATEST_CHROMIUM
@@ -470,14 +473,14 @@ android_default_version_code = "$DEFAULT_VERSION"
 EOF
   gn gen out/Default
 
-  log "Building chromium monochrome_public_apk target"
-  autoninja -C out/Default/ monochrome_public_apk
+  log "Building chromium chrome_modern_public_apk target"
+  autoninja -C out/Default/ chrome_modern_public_apk
 
   # copy to build tree
   mkdir -p ${BUILD_DIR}/external/chromium/prebuilt/arm64
-  cp out/Default/apks/MonochromePublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
+  cp out/Default/apks/ChromeModernPublic.apk ${BUILD_DIR}/external/chromium/prebuilt/arm64/
   # copy this apk outside of chromium folder, in case of
-  cp out/Default/apks/MonochromePublic.apk $CHAOSP_DIR/
+  cp out/Default/apks/ChromeModernPublic.apk $CHAOSP_DIR/
 
   # upload to s3 for future builds
   echo "${CHROMIUM_REVISION}" > $CHAOSP_DIR/chromium/revision
@@ -495,7 +498,7 @@ aosp_repo_modifications() {
   cd "${BUILD_DIR}"
 
   # make modifications to default AOSP
-  if ! grep -q "RattlesnakeOS" .repo/manifest.xml; then
+  if ! grep -q "RattlesnakeOS" .repo/manifests/default.xml; then
     # really ugly awk script to add additional repos to manifest
     awk -i inplace \
       -v ANDROID_VERSION="$ANDROID_VERSION" \
@@ -519,14 +522,14 @@ aosp_repo_modifications() {
       print "  <project path=\"packages/apps/Updater\" name=\"platform_packages_apps_Updater\" remote=\"github\" />";
       print "  <project path=\"packages/apps/F-Droid\" name=\"platform_external_fdroid\" remote=\"github\" />";
       print "  <project path=\"packages/apps/F-DroidPrivilegedExtension\" name=\"privileged-extension\" remote=\"fdroid\" revision=\"refs/tags/" FDROID_PRIV_EXT_VERSION "\" />";
-      print "  <project path=\"vendor/android-prepare-vendor\" name=\"android-prepare-vendor\" remote=\"github\" />"}' .repo/manifest.xml
+      print "  <project path=\"vendor/android-prepare-vendor\" name=\"android-prepare-vendor\" remote=\"github\" />"}' .repo/manifests/default.xml
  
     # remove things from manifest
     # TODO: add this back when trichrome webview is working
     # sed -i '/chromium-webview/d' .repo/manifest.xml
-    sed -i '/packages\/apps\/Browser2/d' .repo/manifest.xml
-    sed -i '/packages\/apps\/Calendar/d' .repo/manifest.xml
-    sed -i '/packages\/apps\/QuickSearchBox/d' .repo/manifest.xml
+    sed -i '/packages\/apps\/Browser2/d' .repo/manifests/default.xml
+    sed -i '/packages\/apps\/Calendar/d' .repo/manifests/default.xml
+    sed -i '/packages\/apps\/QuickSearchBox/d' .repo/manifests/default.xml
   else
     log "Skipping modification of .repo/manifest.xml as they have already been made"
   fi
