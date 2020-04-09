@@ -1,43 +1,102 @@
 #!/bin/bash
 
-
 CHAOSP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 export TMPDIR="$CHAOSP_DIR/tmp"
 ADD_MAGISK=false
 ADD_OPENGAPPS=false
+BUILD_TYPE="user"
+BUILD_CHANNEL="beta"
+FORCE_BUILD=false
+
+usage(){
+  __usage="
+  Usage: $(basename $0) [OPTIONS] device_codename
+
+  Options:
+    -t, --build-type=TYPE          AOSP build type, i.e., user(default)/userdebug/eng. See https://source.android.com/setup/build/building
+    -c, --release-channel=CHANNEL  The channel, i.e., beta(default)/stable, to which the resulting ROM should be released. At this time, the value selected is meaningless because the ROM is not yet being published to AWS. See https://github.com$
+    -m, --add-magisk               Adds magisk to the build. See https://www.xda-developers.com/what-is-magisk/
+    -g, --add-gapps                Adds Open Gapps to the build. See https://opengapps.org/
+    -f, --force-build              Forces a build to occur, even when new versions of AOSP/Chromium/etc. are not found
+    -a, --aosp-branch=BRANCH       The source code tag/branch, as listed on https://android.googlesource.com/platform/manifest/+refs. For example: android-10.0.0_r33
+    -b, --aosp-build-id=ID         The android build ID, as listed on https://developers.google.com/android/ota. For example: qq2a.200405.005
+  "
+  echo "$__usage"
+  exit 1
+}
+
+i=1
+while :; do
+  arrIN=(${1//=/ })
+  case ${arrIN[0]} in
+    -t|--build-type)
+      if [ ${#arrIN[@]} > 1 ]; then
+        BUILD_TYPE=${arrIN[1]}
+      else
+        die 'ERROR: "--build-type" requires a non-empty option argument.'
+      fi
+      ;;
+    -t|--release-channel)
+      if [ ${#arrIN[@]} > 1 ]; then
+        BUILD_CHANNEL=${arrIN[1]}
+      else
+        die 'ERROR: "--release-channel" requires a non-empty option argument.'
+      fi
+      ;;
+    -m|--add-magisk)
+      ADD_MAGISK=true
+      ;;
+    -g|--add-gapps)
+      ADD_OPENGAPPS=true
+      ;;
+    -f|--force-build)
+      FORCE_BUILD=true
+      FORCE_BUILD_EXTRA=true
+      ;;
+    -a|--aosp-branch)
+      if [ ${#arrIN[@]} > 1 ]; then
+        AOSP_BRANCH=${arrIN[1]}
+      else
+        die 'ERROR: "--aosp-branch" requires a non-empty option argument.'
+      fi
+      ;;
+    -b|--aosp-build-id)
+      if [ ${#arrIN[@]} > 1 ]; then
+        AOSP_BUILD=${arrIN[1]}
+      else
+        die 'ERROR: "--aosp-build-id" requires a non-empty option argument.'
+      fi
+      ;;
+    *)
+     if [ "${arrIN[0]}" ]; then
+       case $i in
+         1)
+           DEVICE=${arrIN[0]}
+           ;;
+         *)
+           usage
+         ;;
+       esac
+       ((i=i+1))
+     else
+       break
+     fi
+     ;;
+  esac
+  shift
+done
+
+if [ -z $DEVICE ]; then
+  echo "Need to specify device name as argument"
+  exit 1
+fi
 
 mkdir -p $CHAOSP_DIR/revisions
 mkdir -p $CHAOSP_DIR/revisions/fdroid
 mkdir -p $CHAOSP_DIR/revisions/fdroid-priv
 mkdir -p $TMPDIR
 
-
-usage(){
-  echo "./build.sh [-m (add Magisk)] [-g (add OpenGapps)] device_name"
-  exit 1
-}
-
-
-while getopts ":mgh" opt; do
-  case $opt in
-    m) ADD_MAGISK=true
-    ;;
-    g) ADD_OPENGAPPS=true
-    ;;
-    *) usage;;
-  esac
-done
-
-shift $(($OPTIND - 1))
-#remaining_args="$@"
-
-if [ $# -lt 1 ]; then
-  echo "Need to specify device name as argument"
-  exit 1
-fi
-
 # check if supported device
-DEVICE=$1
 case "$DEVICE" in
   marlin|sailfish)
     DEVICE_FAMILY=marlin
@@ -68,17 +127,6 @@ case "$DEVICE" in
     ;;
 esac
 
-# this is a build time option to override stack setting IGNORE_VERSION_CHECKS
-FORCE_BUILD=false
-if [ "$2" = true ]; then
-  echo "Setting FORCE_BUILD=true"
-  FORCE_BUILD=true
-fi
-
-# allow build and branch to be specified
-AOSP_BUILD=$3
-AOSP_BRANCH=$4
-
 # version of chromium to pin to if requested
 #CHROMIUM_PINNED_VERSION=<% .ChromiumVersion %>
 
@@ -89,12 +137,6 @@ ENCRYPTION_PIPE="/tmp/key"
 
 # pin to specific version of android
 ANDROID_VERSION="10.0"
-
-# build type (user or userdebug)
-BUILD_TYPE="user"
-
-# build channel (stable or beta)
-BUILD_CHANNEL="beta"
 
 # user customizable things
 #HOSTS_FILE="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-social/hosts"
@@ -283,6 +325,7 @@ full_run() {
 build_fdroid() {
   log_header ${FUNCNAME}
   # build it outside AOSP build tree or hit errors
+  rm -rf ${CHAOSP_DIR}/fdroidclient
   git clone https://gitlab.com/fdroid/fdroidclient ${CHAOSP_DIR}/fdroidclient
   pushd ${CHAOSP_DIR}/fdroidclient
   echo "sdk.dir=${CHAOSP_DIR}/sdk" > local.properties
@@ -925,7 +968,9 @@ build_aosp() {
 }
 
 get_radio_image() {
-  grep -Po "require version-$1=\K.+" vendor/$2/vendor-board-info.txt | tr '[:upper:]' '[:lower:]'
+#  grep -Po "require version-$1=\K.+" vendor/$2/vendor-board-info.txt | tr '[:upper:]' '[:lower:]'
+
+grep -Po "require version-$1=\K.+" vendor/$FORCE_BUILD_EXTRA/vendor-board-info.txt | tr '[:upper:]' '[:lower:]'
 }
 
 release() {
